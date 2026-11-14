@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # AutoBot - AI-Powered Automation Platform
 # Author: mrveiss
-"""The three `Unified*` config aliases and the four instance aliases are gone and stay gone (#21526, #21533).
+"""The three `Unified*` config aliases and the three instance aliases are gone and stay gone (#21526, #21533).
 
 #959 renamed `UnifiedConfigManager` / `get_unified_config_manager` / `UnifiedConfigSettings`
 to `ConfigManager` / `get_config_manager` / `ConfigSettings` but left the old names behind as
 `# Deprecated` aliases with live users. #21526 migrated the users and removed the aliases; the
 repo rule is ONE canonical name, so a variant of it must not return. #21533 did the same for the module-level
 INSTANCE aliases `unified_config_manager` and `global_config_manager`: both resolved to the one `config_manager` object.
-The last two, `config` and `cfg`, resolved to that same object through the config package's `__getattr__`; importers now
-use `config_manager` and the package no longer answers to them.
+The last, `cfg`, resolved to that same object through the config package's `__getattr__`; importers now use
+`config_manager` and the package no longer answers to it. `config` is NOT an alias: `config/__init__.py` binds it at
+module level to the SSOT proxy (`autobot_shared.ssot_config.config`), a different object, so it stays and is not a hit.
 
 Scope, stated so an empty result is read correctly: every git-tracked `.py` file (comment lines
 excluded, via the shared comment helper) and every tracked `.md` file, minus this file, changelogs
@@ -28,10 +29,10 @@ package's attribute or bind the old spelling as a name:
   quoted string `"<name>"` (a `setattr`/`getattr`/`patch` target) are matched per line, in Python and Markdown.
 * Markdown keeps the per-line `from config import <name>` match (including `import a, <name>`).
 
-`config` and `cfg` are common names, so they are hits only where they name the config PACKAGE's attribute: a
-`from config import config|cfg` (parsed, any depth, with or without `as`), a `config_pkg.config|cfg` access, and a quoted
-`"config.config"` / `"config.cfg"` patch target. A bare `config.config` is NOT a hit: it is an ordinary attribute of
-unrelated config objects (connectors, domain security). `from autobot_shared.ssot_config import config` is another module.
+`cfg` is a common name, so it is a hit only where it names the config PACKAGE's attribute: a `from config import cfg`
+(parsed, any depth, with or without `as`), a `config_pkg.cfg` access, and a quoted `"config.cfg"` patch target.
+`from config import config`, `config_pkg.config` and `"config.config"` are NOT hits (the SSOT proxy, see above).
+On the Markdown / unparsable-file path a parenthesised multi-line `from config import (` block is read as one statement.
 
 A local variable, a parameter, a `<name>.py` module path, `_fake_<name>` helpers and `TestUnifiedConfigTimeouts` are
 not hits. NOT seen: a bare relative `from . import <name>` inside the config package (no module name to resolve),
@@ -42,6 +43,7 @@ import hit.
 from __future__ import annotations
 
 import ast
+import bisect
 import functools
 import re
 from pathlib import Path
@@ -75,10 +77,12 @@ REMOVED_NAME = re.compile(r"\b(?:UnifiedConfigManager|get_unified_config_manager
 
 _INSTANCE_NAMES = ("unified_config_manager", "global_config_manager")
 _INSTANCE_ALT = "|".join(_INSTANCE_NAMES)
-_PKG_ATTRS = ("config", "cfg")  # removed #21533: the package attribute, never a bare local of that name
+_PKG_ATTRS = ("cfg",)  # removed #21533 (`config` is the SSOT proxy, a real module attribute, so it is not listed)
 _FROM_NAMES = _INSTANCE_NAMES + _PKG_ATTRS
-_PKG_ATTR_USE = re.compile(r"(?<![\w.])config_pkg\.(config|cfg)\b")
-_PKG_PATCH_TARGET = re.compile(r"[\"']config\.(config|cfg)(?:\.\w+)*[\"']")
+_PKG_ATTR_USE = re.compile(r"(?<![\w.])config_pkg\.(cfg)\b")
+_PKG_PATCH_TARGET = re.compile(r"[\"']config\.(cfg)(?:\.\w+)*[\"']")
+_PAREN_IMPORT = re.compile(r"\bfrom\s+\.?config\s+import\s*\(\s*(?:#[^\n]*)?\n([^)]*)\)")
+_FIRST_WORD = re.compile(r"\s*(?:#[^\n]*\n\s*)*(\w+)")
 _FROM_IMPORT = re.compile(r"\bfrom config import\s+([^#]*)")
 _ATTR_USE = re.compile(rf"(?<![\w.])(?:config|config_pkg)\.({_INSTANCE_ALT})\b")
 _QUOTED = re.compile(rf"[\"']({_INSTANCE_ALT})[\"']")
@@ -111,6 +115,22 @@ def _instance_hits(line: str, imports: bool = True) -> list[str]:
     if imp:
         firsts = (re.match(r"\W*(\w+)", part) for part in imp.group(1).split(","))
         found += [m.group(1) for m in firsts if m and m.group(1) in _FROM_NAMES]
+    return found
+
+
+def paren_import_hits(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """(line, name) of removed names in parenthesised multi-line `from config import (` blocks of *lines*."""
+    text = "\n".join(ln for _, ln in lines)
+    starts = [0]
+    for _, ln in lines[:-1]:
+        starts.append(starts[-1] + len(ln) + 1)
+    found: list[tuple[int, str]] = []
+    for block in _PAREN_IMPORT.finditer(text):
+        for part in re.finditer(r"[^,]+", block.group(1)):
+            word = _FIRST_WORD.match(part.group(0))
+            if word and word.group(1) in _FROM_NAMES:
+                pos = block.start(1) + part.start() + word.start(1)
+                found.append((lines[bisect.bisect_right(starts, pos) - 1][0], word.group(1)))
     return found
 
 
@@ -148,7 +168,8 @@ def hits_in(
     lines = [(n, ln) for n, ln in lines if ln.strip() not in allowed]
     named = [(n, m.group(0)) for n, ln in lines for m in REMOVED_NAME.finditer(ln)]
     line_imports = parsed is None  # Markdown, or a Python file that did not parse
-    return named + [(n, name) for n, ln in lines for name in _instance_hits(ln, line_imports)] + (parsed or [])
+    per_line = [(n, name) for n, ln in lines for name in _instance_hits(ln, line_imports)]
+    return named + per_line + (parsed or []) + (paren_import_hits(lines) if line_imports else [])
 
 
 def _sweep(root: Path, files=None) -> tuple[list[str], set[str], int]:
@@ -253,9 +274,9 @@ def test_binding_an_old_spelling_by_import_as_is_refused() -> None:
     """Control: the local re-binding class (`import ... as <old name>`), at module level and inside a function."""
     for name in _INSTANCE_NAMES:
         assert hits_in(f"from config import config_manager as {name}\n", "x.py") == [(1, name)]
-        assert hits_in(f"from config import config as {name}  # noqa\n", "x.py") == [(1, "config"), (1, name)]
+        assert hits_in(f"from config import config as {name}  # noqa\n", "x.py") == [(1, name)]
         assert hits_in(f"import config as {name}\n", "x.py") == [(1, name)]
-        assert hits_in(f"def f():\n    from config import config as {name}\n", "x.py") == [(2, "config"), (2, name)]
+        assert hits_in(f"def f():\n    from config import config as {name}\n", "x.py") == [(2, name)]
     assert not hits_in("from config import config_manager as config_instance\n", "x.py")
     assert not hits_in('"""from config import config as global_config_manager"""\n', "x.py")
 
@@ -289,8 +310,8 @@ def test_the_sweep_reaches_python_and_markdown_and_skips_history() -> None:
     assert not any(p.startswith("docs/archives/") for p in read)
 
 
-def test_the_config_and_cfg_package_aliases_are_caught_in_every_form_and_not_look_alikes() -> None:
-    """Control (#21533): each way to reach `config.config` / `config.cfg` is caught; same-spelled locals are not."""
+def test_the_cfg_package_alias_is_caught_in_every_form_and_not_look_alikes() -> None:
+    """Control (#21533): each way to reach `config.cfg` is caught; same-spelled locals and the SSOT proxy `config` are not."""
     for name in _PKG_ATTRS:
         for hit in (
             f"from config import {name}",
@@ -307,6 +328,10 @@ def test_the_config_and_cfg_package_aliases_are_caught_in_every_form_and_not_loo
         assert hits_in(f"from config import {name}\nbroken(:\n", "x.py") == [(1, name)], name
     for fine in (
         "from config import config_manager",
+        "from config import config",
+        "from config import config as ssot_proxy",
+        "config_pkg.config.redis",
+        "patch('config.config', fake)",
         "from config import config_manager as config",
         "from config import config_manager as cfg",
         "from autobot_shared.ssot_config import config",
@@ -317,3 +342,13 @@ def test_the_config_and_cfg_package_aliases_are_caught_in_every_form_and_not_loo
         "config = Config()",
     ):
         assert not hits_in(fine + "\n", "x.py"), fine
+
+
+def test_a_parenthesised_multi_line_import_is_caught_on_the_markdown_and_unparsable_path() -> None:
+    """Control (thread on the fallback path): a block with `cfg` is a hit, the same block with `config_manager` is not."""
+    md = "```python\nfrom config import (\n    config_manager,\n    cfg,\n)\n```\n"
+    assert hits_in(md, "x.md") == [(4, "cfg")]
+    assert not hits_in(md.replace("cfg", "config_manager as cm"), "x.md")
+    assert hits_in("from config import (\n    cfg as c,\n)\nbroken(:\n", "x.py") == [(2, "cfg")]
+    assert hits_in("from config import (  # note\n    # why\n    cfg\n)\n", "x.md") == [(3, "cfg")]
+    assert not hits_in("from config import (\n    config,\n)\n", "x.md")

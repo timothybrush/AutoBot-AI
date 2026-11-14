@@ -255,6 +255,9 @@ __all__ = [
     "get_config_manager",
     # Settings
     "ConfigSettings",
+    # The SSOT proxy bound by the module-level `from autobot_shared.ssot_config import config`;
+    # NOT an alias of config_manager (#21533). `cfg` was the alias and is gone.
+    "config",
     # Convenience functions
     "get_config_value",
     "get_config_section",
