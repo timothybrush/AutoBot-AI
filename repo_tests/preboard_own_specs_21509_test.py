@@ -327,7 +327,7 @@ def test_comments_are_stripped_from_every_config_suffix_vitest_looks_for(lane, t
     config.write_text(
         "export default { test: {\n"
         "  // include: ['dead/**/*.spec.ts'],\n"
-        "  /* include: ['also-dead/**/*.spec.ts'], */\n"
+        "  /* include: ['also-dead/x.spec.ts'], */\n"
         "  include: ['live/**/*.spec.ts'],\n"
         "} }\n",
         encoding="utf-8",
@@ -470,7 +470,11 @@ def test_node_is_set_up_as_the_frontend_test_job_does_it(jobs) -> None:
 
 
 def _lines(script: str) -> list[list[str]]:
-    lines = [c.text for c in code_lines(script, name="step.sh", join_continuations=True) if c.text.strip()]
+    lines = [
+        c.text
+        for c in code_lines(script, name="step.sh", strip_trailing=True, join_continuations=True)
+        if c.text.strip()
+    ]
     return [shlex.split(line, posix=False) for line in lines]
 
 
