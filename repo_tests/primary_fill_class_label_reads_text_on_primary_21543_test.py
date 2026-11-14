@@ -12,7 +12,8 @@ It counts when the run holds a primary fill (``bg-autobot-primary`` with any var
 suffix, or the ``-hover``/``-active``/``-light``/``-dark``/``-bg`` shade) AND a white ``text-`` utility
 (``text-white``, ``text-[white]``, ``text-[#fff]``, any variant prefix). Not counted: the token
 ``text-autobot-text-on-primary``, a white label on any other fill, a primary fill with no text utility,
-a label in a different attribute or element, and anything inside a comment. Test files are not read.
+a label in a different attribute or element, and a comment the shared helper strips.
+Comments are whatever ``tools.lint._comment_syntax`` strips for the file type. Test files are not read.
 
 **The pin.** ``WHITE_ON_PRIMARY_CLASS_LABELS`` is empty: every site is converted. Entries only shrink.
 """
@@ -59,10 +60,12 @@ _QUIET = {
     "label-in-another-attribute": '<a class="bg-autobot-primary" :class="[\'text-white\']">x</a>',
     "label-on-a-sibling-element": '<a class="bg-autobot-primary"><b class="text-white">x</b></a>',
     "inverse-token": '<a class="bg-autobot-primary text-autobot-text-inverse">x</a>',
+}
+#: Comment controls, chosen so they hold for every version of the shared helper that strips these two forms:
+#: a block comment and a whole-line ``//`` comment. Trailing ``//`` and ``<!-- -->`` are not asserted either way.
+_COMMENTED = {
     "block-comment": "/* bg-autobot-primary text-white */\nconst a = 1",
-    "html-comment": '<!-- <a class="bg-autobot-primary text-white">x</a> -->\n<b/>',
-    "line-comment": "// cls: 'bg-autobot-primary text-white'\nconst a = 1",
-    "trailing-line-comment": "const a = 1 // 'bg-autobot-primary text-white'",
+    "whole-line-comment": "// cls: 'bg-autobot-primary text-white'\nconst a = 1",
 }
 
 
@@ -76,6 +79,11 @@ class TestTheDetectorWorksBeforeItsOutputIsRead:
     @pytest.mark.parametrize("source", _QUIET.values(), ids=list(_QUIET))
     def test_the_token_other_fills_and_comments_stay_quiet(self, source: str) -> None:
         assert white_class_on_primary_in(source) == 0
+
+    @pytest.mark.parametrize("name", ["A.vue", "a.ts", "a.js"])
+    @pytest.mark.parametrize("source", _COMMENTED.values(), ids=list(_COMMENTED))
+    def test_a_comment_the_shared_helper_strips_does_not_count(self, source: str, name: str) -> None:
+        assert white_class_on_primary_in(source, name) == 0
 
     def test_two_offending_strings_count_twice(self) -> None:
         two = '<a class="bg-autobot-primary text-white">x</a>\n<b class="text-white bg-autobot-primary">y</b>'
