@@ -272,3 +272,44 @@ def test_module_typescript_suffixes_get_slash_and_block_comment_handling(name) -
     source = "// banned_one\n/* banned_two */\nconst live = 1\n"
     text = code_text(source, name=name)
     assert "banned" not in text and "const live = 1" in text
+
+
+@pytest.mark.parametrize(
+    "source,kept",
+    [
+        ("const n = i++ / 2; /* banned_token */\n", "const n = i++ / 2;"),
+        ("const n = i++ / 2 + '/'; /* banned_token */\n", "const n = i++ / 2 + '/';"),
+        ("const n = i-- / 2 + '/'; /* banned_token */\n", "const n = i-- / 2 + '/';"),
+        ("<b>x</b> '/' /* banned_token */\n", "<b>x</b> '/'"),
+        ("const w = </b> /* banned_token */\n", "const w = </b>"),
+        ("i++ / 2; // don't\n/* banned_token */\nconst k = 1\n", "i++ / 2;"),
+        ("<div>x</div> // worker's\n/* banned_token */\nconst k = 1\n", "<div>x</div>"),
+        ("x! / 2; // don't\n/* banned_token */\nconst k = 1\n", "x! / 2;"),
+        ("const d = 8 / 2 / 1; /* banned_token */\n", "const d = 8 / 2 / 1;"),
+    ],
+)
+def test_a_division_is_never_read_as_a_regex_that_swallows_a_comment(source, kept) -> None:
+    text = code_text(source, name="x.vue", strip_trailing=True)
+    assert "banned_token" not in text and "worker" not in text and "don't" not in text, text
+    assert kept in text, f"the code before the comment was damaged: {text!r}"
+
+
+@pytest.mark.parametrize(
+    "source,regex",
+    [
+        ("if (!/'/.test(x)) {} /* banned_token */\n", "!/'/.test(x)"),
+        ("x = /'\\//; /* banned_token */\n", "/'\\//"),
+        ("x = /a\\/\\/b/;  // banned_token\n", "/a\\/\\/b/;"),
+        ("const re = /[//]/; /*\nbanned_token\n*/\n", "/[//]/;"),
+        ("function f() { return /'/ } /* banned_token */\n", "return /'/"),
+    ],
+)
+def test_a_regex_literal_stays_a_regex_and_the_comment_after_it_is_stripped(source, regex) -> None:
+    text = code_text(source, name="x.ts", strip_trailing=True)
+    assert "banned_token" not in text, text
+    assert regex in text, f"the regex literal was damaged: {text!r}"
+
+
+def test_a_vue_line_with_a_closing_tag_a_html_comment_and_a_line_comment_is_read_as_code() -> None:
+    text = code_text('<a href="/x/y">t</a> <!-- n --> // banned_token\n', name="x.vue", strip_trailing=True)
+    assert 'href="/x/y">t</a>' in text and "banned_token" not in text and "<!-- n -->" in text

@@ -129,8 +129,9 @@ def strip_trailing_comment(line: str, markers: Sequence[str], *, escapes: bool =
     return line
 
 
-#: A `/` after one of these (or after nothing, or a newline) begins a regex literal, not a division.
-_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+#: A `/` after one of these (or after nothing, or a newline) begins a regex literal, not a division. `<` and `>`
+#: are left out: `</tag>` and `<br/>` are everywhere in `.vue`, `a < /re/` is not. `++` and `--` are handled apart.
+_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%~^")
 _REGEX_AFTER_WORDS = frozenset({"return", "typeof", "case", "in", "of", "void", "delete", "throw"})
 _TRAILING_WORD = re.compile(r"[A-Za-z0-9_$]+$")
 
@@ -214,13 +215,19 @@ class _BlockScan:
     def _regex_allowed(self) -> bool:
         """Whether a `/` here opens a regex literal: at a line start, or after an operator or a keyword."""
         before = self.recent.rstrip(" \t")
+        if before[-2:] in ("++", "--"):
+            return False  # a postfix increment ends an operand, so the slash divides
         if not before or before[-1] == "\n" or before[-1] in _REGEX_AFTER:
             return True
         word = _TRAILING_WORD.search(before)
         return word is not None and word.group() in _REGEX_AFTER_WORDS
 
     def _regex_end(self) -> int:
-        """Index after the closing `/` of the regex literal opening here, 0 when it does not close on this line."""
+        """Index after the closing `/` of the regex literal opening here, 0 when there is none to accept.
+
+        0 when it does not close on this line, or when the close is followed by `/` or `*`: that is a division
+        whose operand is followed by a comment opener, and the comment rules must see it.
+        """
         in_class, j = False, self.i + 1
         while j < len(self.text) and self.text[j] != "\n":
             char = self.text[j]
@@ -231,7 +238,7 @@ class _BlockScan:
             elif char == "]":
                 in_class = False
             elif char == "/" and not in_class:
-                return j + 1
+                return 0 if self.text[j + 1 : j + 2] in ("/", "*") else j + 1
             j += 1
         return 0
 
