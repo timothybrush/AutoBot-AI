@@ -131,10 +131,25 @@ def strip_trailing_comment(line: str, markers: Sequence[str], *, escapes: bool =
 
 
 #: A `/` after one of these (or after nothing, or a newline) begins a regex literal, not a division. `<` and `>`
-#: are left out: `</tag>` and `<br/>` are everywhere in `.vue`, `a < /re/` is not. `++` and `--` are handled apart.
+#: are left out: `</tag>` and `<br/>` are everywhere in `.vue`, `a < /re/` is not (`=>` is handled apart, as are
+#: `++`/`--` and a postfix `!`). `of` and `in` are left out of the words: `of` is an ordinary identifier, and a regex
+#: literal is neither iterable nor a sensible right operand of `in`.
 _REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%~^")
-_REGEX_AFTER_WORDS = frozenset({"return", "typeof", "case", "in", "of", "void", "delete", "throw"})
+_REGEX_AFTER_WORDS = frozenset({"return", "typeof", "case", "void", "delete", "throw"})
 _TRAILING_WORD = re.compile(r"[A-Za-z0-9_$]+$")
+
+
+def _ends_with_regex_word(before: str) -> bool:
+    """Whether *before* ends in a keyword after which an expression, and so a regex, may start."""
+    word = _TRAILING_WORD.search(before)
+    return word is not None and word.group() in _REGEX_AFTER_WORDS
+
+
+def _prefix_position(prior: str) -> bool:
+    """Whether a `!` that follows *prior* negates (so a regex may follow it) rather than asserts non-null (`x!`)."""
+    if not prior or prior[-1] not in ")]" and _TRAILING_WORD.search(prior) is None:
+        return True
+    return _ends_with_regex_word(prior)
 
 
 class _BlockScan:
@@ -222,10 +237,13 @@ class _BlockScan:
         before = self.recent.rstrip(" \t")
         if before[-2:] in ("++", "--"):
             return False  # a postfix increment ends an operand, so the slash divides
+        if before[-2:] == "=>":
+            return True  # an arrow function's body
+        if before[-1:] == "!":
+            return _prefix_position(before[:-1].rstrip(" \t"))
         if not before or before[-1] == "\n" or before[-1] in _REGEX_AFTER:
             return True
-        word = _TRAILING_WORD.search(before)
-        return word is not None and word.group() in _REGEX_AFTER_WORDS
+        return _ends_with_regex_word(before)
 
     def _regex_end(self) -> int:
         """Index after the closing `/` of the regex literal opening here, 0 when there is none to accept.
@@ -304,32 +322,43 @@ def code_lines(
     first physical line of it -- the redirect and the `|| true` can sit two
     lines below the thing the guard matched on.
     """
-    if isinstance(source, Path):
-        name = name or source
-        text = source.read_text(encoding="utf-8")
-    else:
-        text = source
+    text, name = _read(source, name)
     markers = markers_for(name) if name is not None else _DEFAULT_MARKERS
     suffix = Path(name).suffix if name is not None else ""
-    escapes = suffix in _BACKSLASH_ESCAPES
     text, cuts = _scan_block_syntax(text, suffix)
+    trailing = (cuts, markers, suffix in _BACKSLASH_ESCAPES) if strip_trailing else None
+    kept = _code_lines_of(text, markers, trailing)
+    return _join_continuations(kept) if join_continuations else kept
 
+
+def _read(source: str | Path, name: str | Path | None) -> tuple[str, str | Path | None]:
+    """``(text, name)`` of *source*: a `Path` is read and names itself, a string is the text."""
+    if isinstance(source, Path):
+        return source.read_text(encoding="utf-8"), name or source
+    return source, name
+
+
+def _code_lines_of(text: str, markers: Sequence[str], trailing: tuple | None) -> list[CodeLine]:
+    """The lines of *text* that do not start with a comment marker, each cut at its trailing comment if *trailing*.
+
+    *trailing* is ``(scanner cuts or None, markers, backslash escapes)``; the scanner's cuts decide where a `//`
+    comment starts on the block-comment suffixes, `strip_trailing_comment` everywhere else.
+    """
     kept: list[CodeLine] = []
     offset = 0
     for lineno, (raw, whole) in enumerate(zip(text.splitlines(), text.splitlines(True)), 1):
         start, offset = offset, offset + len(whole)
         if any(raw.lstrip().startswith(marker) for marker in markers):
             continue
-        if strip_trailing:
-            if cuts is None:
-                raw = strip_trailing_comment(raw, markers, escapes=escapes)
-            else:
-                raw = _cut_comment(raw, start, cuts)
-        kept.append(CodeLine(lineno, raw))
-
-    if join_continuations:
-        kept = _join_continuations(kept)
+        kept.append(CodeLine(lineno, _cut_trailing(raw, start, trailing) if trailing else raw))
     return kept
+
+
+def _cut_trailing(raw: str, start: int, trailing: tuple) -> str:
+    cuts, markers, escapes = trailing
+    if cuts is None:
+        return strip_trailing_comment(raw, markers, escapes=escapes)
+    return _cut_comment(raw, start, cuts)
 
 
 def _join_continuations(lines: Iterable[CodeLine]) -> list[CodeLine]:

@@ -23,8 +23,11 @@ from pathlib import Path
 
 from tools.lint._comment_syntax import code_text
 
-#: Vitest's config file names, in the order it looks for them.
-CONFIG_NAMES = ("vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs")
+#: Vitest's config file names, in the order it looks for them: ``configFiles`` in ``packages/vitest/src/constants.ts``
+#: (tags v5.0.0 and v5.0.5, and the installed 5.0.0 ``dist``) is ``['vitest.config', 'vite.config']`` crossed with
+#: ``['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs']``, the ``vitest.config`` family first.
+_CONFIG_EXTENSIONS = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs")
+CONFIG_NAMES = tuple(f"{stem}{ext}" for stem in ("vitest.config", "vite.config") for ext in _CONFIG_EXTENSIONS)
 
 #: A file name that looks like a spec; whether a package collects it is the config's call.
 SPEC_NAME = re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$")
@@ -181,6 +184,21 @@ def _strings_of(body: str) -> list[str]:
     return [a or b for a, b in _QUOTED.findall(body)]
 
 
+def _refuse_object_spread(config_path: Path, test: str) -> None:
+    """Raise when the ``test`` object spreads another object: that can override ``include``/``exclude`` unseen.
+
+    *test* holds the depth-one text only (nested objects are already gone); string contents and array contents
+    are blanked first, so ``...configDefaults.exclude`` inside the ``exclude`` array is not an object spread.
+    """
+    flat, depth, kept = _QUOTED.sub('""', test), 0, []
+    for char in flat:
+        depth += (char == "[") - (char == "]")
+        if depth == 0 and char != "]":
+            kept.append(char)
+    if "..." in "".join(kept):
+        raise UnreadableConfig(f"{config_path.name}: test spreads another object, which can override include/exclude")
+
+
 def _array_rule(config_path: Path, test: str, key: str) -> tuple[list[str], bool] | None:
     """``(globs, spreads the default exclude)`` of the ``key`` array, ``None`` when the key is absent.
 
@@ -209,6 +227,7 @@ def package_rules(config_path: Path) -> tuple[list[str], list[str]]:
     if re.search(r"\btest\s*:", text) and not re.search(r"\btest\s*:\s*\{", text):
         raise UnreadableConfig(f"{config_path.name}: test is not an object literal")
     test = _test_object(text)
+    _refuse_object_spread(config_path, test)
     include = _array_rule(config_path, test, "include")
     exclude = _array_rule(config_path, test, "exclude")
     include_globs = list(DEFAULT_INCLUDE) if include is None else include[0]

@@ -286,6 +286,10 @@ def test_module_typescript_suffixes_get_slash_and_block_comment_handling(name) -
         ("<div>x</div> // worker's\n/* banned_token */\nconst k = 1\n", "<div>x</div>"),
         ("x! / 2; // don't\n/* banned_token */\nconst k = 1\n", "x! / 2;"),
         ("const d = 8 / 2 / 1; /* banned_token */\n", "const d = 8 / 2 / 1;"),
+        ("const n = x! / 2 + '/'; /* banned_token */\n", "const n = x! / 2 + '/';"),
+        ("const of = 8;\nconst n = of / 2 + '/'; /* banned_token */\n", "const n = of / 2 + '/';"),
+        ("<b>x</b> / 2 + '/'; /* banned_token */\n", "<b>x</b> / 2 + '/';"),
+        ("const n = (a) / 2 + '/'; /* banned_token */\n", "const n = (a) / 2 + '/';"),
     ],
 )
 def test_a_division_is_never_read_as_a_regex_that_swallows_a_comment(source, kept) -> None:
@@ -302,6 +306,12 @@ def test_a_division_is_never_read_as_a_regex_that_swallows_a_comment(source, kep
         ("x = /a\\/\\/b/;  // banned_token\n", "/a\\/\\/b/;"),
         ("const re = /[//]/; /*\nbanned_token\n*/\n", "/[//]/;"),
         ("function f() { return /'/ } /* banned_token */\n", "return /'/"),
+        ("const f = (s) => /'/.test(s); /* banned_token */\n", "=> /'/.test(s);"),
+        ("if (a && !/'/.test(x)) {} /* banned_token */\n", "&& !/'/.test(x)"),
+        ("if ((!/'/.test(x))) {} /* banned_token */\n", "(!/'/.test(x))"),
+        ("if (!!/'/.test(x)) {} /* banned_token */\n", "!!/'/.test(x)"),
+        ("function f() { return !/'/.test(x) } /* banned_token */\n", "return !/'/.test(x)"),
+        ("!/'/.test(x); /* banned_token */\n", "!/'/.test(x);"),
     ],
 )
 def test_a_regex_literal_stays_a_regex_and_the_comment_after_it_is_stripped(source, regex) -> None:
@@ -321,6 +331,9 @@ _AGREED = [
     ("const u = 'http://x/y' // c", "const u = 'http://x/y' "),
     ('const s = "a // b" // c', 'const s = "a // b" '),
     ("no comment here", "no comment here"),
+    ("const n = i++ / 2; // c", "const n = i++ / 2; "),
+    ("x! / 2; // c", "x! / 2; "),
+    ("<b>x</b> // c", "<b>x</b> "),
 ]
 
 #: Lines the quote-only strip cannot read (a regex class, an escaped slash, a template, a division).
@@ -328,9 +341,6 @@ _SCANNER_ONLY = [
     ("const re = /[//]/; // c", "const re = /[//]/; "),
     ("x = /a\\/\\/b/; // c", "x = /a\\/\\/b/; "),
     ("const t = `x // y` // c", "const t = `x // y` "),
-    ("const n = i++ / 2; // c", "const n = i++ / 2; "),
-    ("x! / 2; // c", "x! / 2; "),
-    ("<b>x</b> // c", "<b>x</b> "),
 ]
 
 
