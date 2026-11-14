@@ -53,7 +53,7 @@ from repo_tests._paths import repo_root
 from repo_tests._reach import ReachFloorError, declare
 
 from tools.lint import _parse_cache as parse_cache
-from tools.lint._comment_syntax import code_lines
+from tools.lint._comment_syntax import code_lines, strip_trailing_comment
 from tools.lint._scan_helpers import EmptyEnumeration, tracked_paths
 
 _THIS_FILE = "repo_tests/unified_config_aliases_gone_21526_test.py"
@@ -81,8 +81,8 @@ _PKG_ATTRS = ("cfg",)  # removed #21533 (`config` is the SSOT proxy, a real modu
 _FROM_NAMES = _INSTANCE_NAMES + _PKG_ATTRS
 _PKG_ATTR_USE = re.compile(r"(?<![\w.])config_pkg\.(cfg)\b")
 _PKG_PATCH_TARGET = re.compile(r"[\"']config\.(cfg)(?:\.\w+)*[\"']")
-_PAREN_IMPORT = re.compile(r"\bfrom\s+\.?config\s+import\s*\(\s*(?:#[^\n]*)?\n([^)]*)\)")
-_FIRST_WORD = re.compile(r"\s*(?:#[^\n]*\n\s*)*(\w+)")
+_PAREN_IMPORT = re.compile(r"\bfrom\s+\.?config\s+import\s*\(\s*\n([^)]*)\)")
+_FIRST_WORD = re.compile(r"\s*(\w+)")
 _FROM_IMPORT = re.compile(r"\bfrom config import\s+([^#]*)")
 _ATTR_USE = re.compile(rf"(?<![\w.])(?:config|config_pkg)\.({_INSTANCE_ALT})\b")
 _QUOTED = re.compile(rf"[\"']({_INSTANCE_ALT})[\"']")
@@ -120,9 +120,10 @@ def _instance_hits(line: str, imports: bool = True) -> list[str]:
 
 def paren_import_hits(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     """(line, name) of removed names in parenthesised multi-line `from config import (` blocks of *lines*."""
-    text = "\n".join(ln for _, ln in lines)
+    bare = [strip_trailing_comment(ln, ("#",)) for _, ln in lines]  # a `)` inside a comment must not end the block
+    text = "\n".join(bare)
     starts = [0]
-    for _, ln in lines[:-1]:
+    for ln in bare[:-1]:
         starts.append(starts[-1] + len(ln) + 1)
     found: list[tuple[int, str]] = []
     for block in _PAREN_IMPORT.finditer(text):
@@ -310,37 +311,41 @@ def test_the_sweep_reaches_python_and_markdown_and_skips_history() -> None:
     assert not any(p.startswith("docs/archives/") for p in read)
 
 
+_CFG_HITS = (
+    "from config import {n}",
+    "from config import {n} as local_name",
+    "from config import config_manager, {n}",
+    "def f():\n    from config import {n}",
+    "from config import (\n    config_manager,\n    {n},\n)",
+    "config_pkg.{n}.get('x')",
+    "patch('config.{n}', fake)",
+    'patch("config.{n}.get")',
+)
+_CFG_LOOK_ALIKES = (
+    "from config import config_manager",
+    "from config import config",
+    "from config import config as ssot_proxy",
+    "config_pkg.config.redis",
+    "patch('config.config', fake)",
+    "from config import config_manager as config",
+    "from config import config_manager as cfg",
+    "from autobot_shared.ssot_config import config",
+    "from other_pkg import config",
+    "import config as config_pkg",
+    "cfg = config.config",
+    "self.config.config.get('x')",
+    "config = Config()",
+)
+
+
 def test_the_cfg_package_alias_is_caught_in_every_form_and_not_look_alikes() -> None:
     """Control (#21533): each way to reach `config.cfg` is caught; same-spelled locals and the SSOT proxy `config` are not."""
     for name in _PKG_ATTRS:
-        for hit in (
-            f"from config import {name}",
-            f"from config import {name} as local_name",
-            f"from config import config_manager, {name}",
-            f"def f():\n    from config import {name}",
-            f"from config import (\n    config_manager,\n    {name},\n)",
-            f"config_pkg.{name}.get('x')",
-            f"patch('config.{name}', fake)",
-            f'patch("config.{name}.get")',
-        ):
-            assert hits_in(hit + "\n", "x.py"), hit
+        for hit in _CFG_HITS:
+            assert hits_in(hit.format(n=name) + "\n", "x.py"), hit
         assert hits_in(f"run `from config import {name}`\n", "x.md"), name
         assert hits_in(f"from config import {name}\nbroken(:\n", "x.py") == [(1, name)], name
-    for fine in (
-        "from config import config_manager",
-        "from config import config",
-        "from config import config as ssot_proxy",
-        "config_pkg.config.redis",
-        "patch('config.config', fake)",
-        "from config import config_manager as config",
-        "from config import config_manager as cfg",
-        "from autobot_shared.ssot_config import config",
-        "from other_pkg import config",
-        "import config as config_pkg",
-        "cfg = config.config",
-        "self.config.config.get('x')",
-        "config = Config()",
-    ):
+    for fine in _CFG_LOOK_ALIKES:
         assert not hits_in(fine + "\n", "x.py"), fine
 
 
@@ -352,3 +357,11 @@ def test_a_parenthesised_multi_line_import_is_caught_on_the_markdown_and_unparsa
     assert hits_in("from config import (\n    cfg as c,\n)\nbroken(:\n", "x.py") == [(2, "cfg")]
     assert hits_in("from config import (  # note\n    # why\n    cfg\n)\n", "x.md") == [(3, "cfg")]
     assert not hits_in("from config import (\n    config,\n)\n", "x.md")
+
+
+def test_a_closing_paren_inside_a_comment_does_not_end_the_import_block() -> None:
+    """Control: `)` in a trailing comment used to hide a later name; the block without `cfg` has no hit."""
+    block = "from config import (\n    config_manager,  # see (a)\n    {tail},\n)\n"
+    for rel in ("x.md", "x.py"):
+        assert hits_in(block.format(tail="cfg") + ("broken(:\n" if rel == "x.py" else ""), rel) == [(3, "cfg")], rel
+        assert not hits_in(block.format(tail="config_manager as cm"), rel), rel
