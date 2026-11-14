@@ -43,6 +43,7 @@ behaviour matches what the seven call sites already relied on.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple, Sequence
 
@@ -58,6 +59,8 @@ _MARKERS: dict[str, tuple[str, ...]] = {
     ".cfg": ("#",),
     ".ini": ("#",),
     ".ts": ("//",),
+    ".mts": ("//",),
+    ".cts": ("//",),
     ".js": ("//",),
     ".mjs": ("//",),
     ".cjs": ("//",),
@@ -80,7 +83,7 @@ _BACKSLASH_ESCAPES = frozenset({".sh", ".bash", ""})
 #: the very line it guards. The anchor was a heuristic; quote tracking is the
 #: actual answer, since a `/*` inside a string literal is data in every case the
 #: heuristic was approximating.
-_BLOCK_COMMENTS = frozenset({".ts", ".js", ".mjs", ".cjs", ".vue", ".json5"})
+_BLOCK_COMMENTS = frozenset({".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".vue", ".json5"})
 
 
 class CodeLine(NamedTuple):
@@ -126,6 +129,12 @@ def strip_trailing_comment(line: str, markers: Sequence[str], *, escapes: bool =
     return line
 
 
+#: A `/` after one of these (or after nothing, or a newline) begins a regex literal, not a division.
+_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+_REGEX_AFTER_WORDS = frozenset({"return", "typeof", "case", "in", "of", "void", "delete", "throw"})
+_TRAILING_WORD = re.compile(r"[A-Za-z0-9_$]+$")
+
+
 class _BlockScan:
     """Position and string/comment state of one `strip_block_comments` pass; each method consumes one construct."""
 
@@ -133,6 +142,7 @@ class _BlockScan:
         self.text = text
         self.line_comments = line_comments
         self.out: list[str] = []
+        self.recent = ""  # the last few emitted characters, runs of blanks collapsed to one
         self.quote: str | None = None
         self.in_block = False
         self.i = 0
@@ -147,29 +157,36 @@ class _BlockScan:
                 self._in_code()
         return "".join(self.out)
 
+    def _emit(self, piece: str) -> None:
+        self.out.append(piece)
+        if piece.strip(" \t"):
+            self.recent = (self.recent + piece)[-16:]
+        elif not self.recent.endswith(" "):
+            self.recent += " "
+
     def _in_block(self) -> None:
         """Inside `/* ... */`: blank everything but newlines, leave at the closing `*/`."""
         if self.text.startswith("*/", self.i):
             self.in_block = False
             self.i += 2
             return
-        self.out.append("\n" if self.text[self.i] == "\n" else " ")
+        self._emit("\n" if self.text[self.i] == "\n" else " ")
         self.i += 1
 
     def _in_string(self) -> None:
         """Inside a string literal: keep it, honour a backslash escape, leave at the matching quote."""
         char = self.text[self.i]
         if char == "\\":
-            self.out.append(self.text[self.i : self.i + 2])
+            self._emit(self.text[self.i : self.i + 2])
             self.i += 2
             return
         if char == self.quote:
             self.quote = None
-        self.out.append(char)
+        self._emit(char)
         self.i += 1
 
     def _in_code(self) -> None:
-        """Outside any string or block: open a string, a block, or step over a `//` comment; else keep the char."""
+        """Outside any string or block: open a string, a block, step over a `//` comment or a regex; else keep."""
         char = self.text[self.i]
         if char in ("'", '"', "`"):
             self.quote = char
@@ -178,13 +195,45 @@ class _BlockScan:
             self.i += 2
             return
         elif self.line_comments and self.text.startswith("//", self.i):
-            end = self.text.find("\n", self.i)
-            end = len(self.text) if end < 0 else end
-            self.out.append(self.text[self.i : end])
-            self.i = end
+            self._keep_to(self._line_end())
             return
-        self.out.append(char)
+        elif self.line_comments and char == "/" and self._regex_allowed() and self._regex_end():
+            self._keep_to(self._regex_end())
+            return
+        self._emit(char)
         self.i += 1
+
+    def _keep_to(self, end: int) -> None:
+        self._emit(self.text[self.i : end])
+        self.i = end
+
+    def _line_end(self) -> int:
+        end = self.text.find("\n", self.i)
+        return len(self.text) if end < 0 else end
+
+    def _regex_allowed(self) -> bool:
+        """Whether a `/` here opens a regex literal: at a line start, or after an operator or a keyword."""
+        before = self.recent.rstrip(" \t")
+        if not before or before[-1] == "\n" or before[-1] in _REGEX_AFTER:
+            return True
+        word = _TRAILING_WORD.search(before)
+        return word is not None and word.group() in _REGEX_AFTER_WORDS
+
+    def _regex_end(self) -> int:
+        """Index after the closing `/` of the regex literal opening here, 0 when it does not close on this line."""
+        in_class, j = False, self.i + 1
+        while j < len(self.text) and self.text[j] != "\n":
+            char = self.text[j]
+            if char == "\\":
+                j += 1
+            elif char == "[":
+                in_class = True
+            elif char == "]":
+                in_class = False
+            elif char == "/" and not in_class:
+                return j + 1
+            j += 1
+        return 0
 
 
 def strip_block_comments(text: str, *, line_comments: bool = False) -> str:

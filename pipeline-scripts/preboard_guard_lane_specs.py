@@ -29,17 +29,14 @@ CONFIG_NAMES = ("vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vi
 #: A file name that looks like a spec; whether a package collects it is the config's call.
 SPEC_NAME = re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$")
 
-#: What Vitest collects when the config declares no ``include`` (its ``configDefaults.include``).
-DEFAULT_INCLUDE = ("**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}",)
+#: What Vitest collects when the config declares no ``include`` (its ``configDefaults.include``). Verified against
+#: ``packages/vitest/src/defaults.ts`` at tags v5.0.0 and v5.0.5, the versions the two lock files pin
+#: (``autobot-slm-frontend`` 5.0.0, ``autobot-frontend`` 5.0.5), and the installed 5.0.0 ``dist``.
+DEFAULT_INCLUDE = ("**/*.{test,spec}.?(c|m)[jt]s?(x)",)
 
-#: What Vitest excludes when the config declares no ``exclude``, and what ``...configDefaults.exclude`` adds.
-DEFAULT_EXCLUDE = (
-    "**/node_modules/**",
-    "**/dist/**",
-    "**/cypress/**",
-    "**/.{idea,git,cache,output,temp}/**",
-    "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*",
-)
+#: What Vitest excludes when the config declares no ``exclude``, and what ``...configDefaults.exclude`` adds
+#: (same source and versions as ``DEFAULT_INCLUDE``: ``['**/node_modules/**', '**/.git/**']`` and nothing else).
+DEFAULT_EXCLUDE = ("**/node_modules/**", "**/.git/**")
 
 _QUOTED = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 _ARRAY = r"\b{key}\s*:\s*\[((?:[^\]'\"]|'[^']*'|\"[^\"]*\")*)\]"
@@ -64,26 +61,99 @@ def expand_braces(pattern: str) -> list[str]:
     return [pattern]
 
 
+class UnreadableConfig(ValueError):
+    """A config declares its ``test`` rules in a shape this reader cannot evaluate (guessing runs the wrong specs)."""
+
+
+_EXTGLOB_SUFFIX = {"@": "", "?": "?", "+": "+", "*": "*"}
+
+
+def _group_end(pattern: str, open_at: int) -> int:
+    """Index of the ``)`` closing the ``(`` at *open_at*."""
+    depth = 0
+    for index in range(open_at, len(pattern)):
+        depth += (pattern[index] == "(") - (pattern[index] == ")")
+        if depth == 0:
+            return index
+    raise UnreadableConfig(f"unbalanced group in glob {pattern!r}")
+
+
+def _alternatives(body: str) -> list[str]:
+    """*body* split on the ``|`` that are not inside a nested group."""
+    parts, depth, last = [], 0, 0
+    for index, char in enumerate(body):
+        depth += (char == "(") - (char == ")")
+        if char == "|" and depth == 0:
+            parts.append(body[last:index])
+            last = index + 1
+    return parts + [body[last:]]
+
+
+def _extglob(pattern: str, index: int, out: list[str]) -> int:
+    """Translate the ``@(a|b)`` / ``?(..)`` / ``+(..)`` / ``*(..)`` group at *index*; return the index after it."""
+    if pattern[index] == "!":
+        raise UnreadableConfig(f"negated group !(...) in glob {pattern!r} is not supported")
+    end = _group_end(pattern, index + 1)
+    alternatives = "|".join(_translate(part) for part in _alternatives(pattern[index + 2 : end]))
+    out.append(f"(?:{alternatives}){_EXTGLOB_SUFFIX[pattern[index]]}")
+    return end + 1
+
+
+def _char_class(pattern: str, index: int, out: list[str]) -> int:
+    """Translate the ``[...]`` class at *index* (``[!x]`` negates); an unclosed ``[`` is a literal."""
+    end = pattern.find("]", index + 2)
+    if end < 0:
+        out.append(re.escape("["))
+        return index + 1
+    body = pattern[index + 1 : end]
+    out.append("[^" + body[1:] + "]" if body[:1] in ("!", "^") else f"[{body}]")
+    return end + 1
+
+
+def _translate_at(pattern: str, index: int, out: list[str]) -> int:
+    """Translate the token at *index* into *out*; return the index after it."""
+    char = pattern[index]
+    if pattern.startswith("**/", index):
+        out.append("(?:.*/)?")
+        return index + 3
+    if pattern.startswith("**", index):
+        out.append(".*")
+        return index + 2
+    if char in "@?+*!" and pattern.startswith("(", index + 1):
+        return _extglob(pattern, index, out)
+    if char == "[":
+        return _char_class(pattern, index, out)
+    out.append("[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char))
+    return index + 1
+
+
 def _translate(pattern: str) -> str:
-    """One brace-free glob as a regular expression: ``**/`` any directories, ``*`` within a segment."""
-    out, index = [], 0
+    """One brace-free glob as a regular expression: ``**/`` any directories, ``*`` within a segment, plus the
+    ``[...]`` classes and ``@( | )`` ``?( )`` ``+( )`` ``*( )`` groups Vitest's matcher also reads."""
+    out: list[str] = []
+    index = 0
     while index < len(pattern):
-        if pattern.startswith("**/", index):
-            out.append("(?:.*/)?")
-            index += 3
-        elif pattern.startswith("**", index):
-            out.append(".*")
-            index += 2
-        else:
-            char = pattern[index]
-            out.append("[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char))
-            index += 1
+        index = _translate_at(pattern, index, out)
     return "".join(out)
 
 
+def _regex(expanded: str) -> re.Pattern[str]:
+    """The compiled form of one brace-free glob; a pattern that does not compile is :class:`UnreadableConfig`."""
+    try:
+        return re.compile(_translate(expanded))
+    except re.error as exc:
+        raise UnreadableConfig(f"glob {expanded!r} is not a valid pattern: {exc}") from exc
+
+
+def check_glob(pattern: str) -> None:
+    """Raise :class:`UnreadableConfig` when *pattern* uses an operator this matcher does not support."""
+    for expanded in expand_braces(pattern):
+        _regex(expanded)
+
+
 def glob_matches(path: str, patterns: tuple[str, ...] | list[str]) -> bool:
-    """Whether the package-relative *path* matches any of the globs (``**``, ``*``, ``?``, ``{a,b}``)."""
-    return any(re.fullmatch(_translate(expanded), path) for pattern in patterns for expanded in expand_braces(pattern))
+    """Whether the package-relative *path* matches any of the globs (``**`` ``*`` ``?`` ``[..]`` ``{a,b}`` groups)."""
+    return any(_regex(expanded).fullmatch(path) for pattern in patterns for expanded in expand_braces(pattern))
 
 
 def _test_object(config: str) -> str:
@@ -109,10 +179,6 @@ def _test_object(config: str) -> str:
 
 def _strings_of(body: str) -> list[str]:
     return [a or b for a, b in _QUOTED.findall(body)]
-
-
-class UnreadableConfig(ValueError):
-    """A config declares its ``test`` rules in a shape this reader cannot evaluate (guessing runs the wrong specs)."""
 
 
 def _array_rule(config_path: Path, test: str, key: str) -> tuple[list[str], bool] | None:
@@ -146,9 +212,12 @@ def package_rules(config_path: Path) -> tuple[list[str], list[str]]:
     include = _array_rule(config_path, test, "include")
     exclude = _array_rule(config_path, test, "exclude")
     include_globs = list(DEFAULT_INCLUDE) if include is None else include[0]
-    if exclude is None:
-        return include_globs, list(DEFAULT_EXCLUDE)
-    return include_globs, exclude[0] + (list(DEFAULT_EXCLUDE) if exclude[1] else [])
+    exclude_globs = list(DEFAULT_EXCLUDE) if exclude is None else exclude[0]
+    if exclude is not None and exclude[1]:
+        exclude_globs += DEFAULT_EXCLUDE
+    for glob in include_globs + exclude_globs:
+        check_glob(glob)
+    return include_globs, exclude_globs
 
 
 def package_of(root: Path, path: str) -> str | None:

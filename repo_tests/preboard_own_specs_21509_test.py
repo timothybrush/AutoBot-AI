@@ -262,6 +262,79 @@ def test_the_glob_reads_double_star_star_question_and_braces_as_vitest_does(lane
     assert lane.specs.glob_matches(path, [pattern]) is expected
 
 
+@pytest.mark.parametrize(
+    "path,pattern,expected",
+    [
+        ("src/a.spec.ts", "src/**/*.spec.@(ts|tsx)", True),
+        ("src/x/a.spec.tsx", "src/**/*.spec.@(ts|tsx)", True),
+        ("src/a.spec.js", "src/**/*.spec.@(ts|tsx)", False),
+        ("src/a.spec.ts", "src/*.spec.ts?(x)", True),
+        ("src/a.spec.tsx", "src/*.spec.ts?(x)", True),
+        ("src/a.spec.tsxx", "src/*.spec.ts?(x)", False),
+        ("src/a.spec.ts", "src/a.spec.t+(s)", True),
+        ("src/a.spec.t", "src/a.spec.t+(s)", False),
+        ("src/a.spec.t", "src/a.spec.t*(s)", True),
+        ("src/b.ts", "src/[ab].ts", True),
+        ("src/c.ts", "src/[ab].ts", False),
+        ("src/c.ts", "src/[!ab].ts", True),
+        ("src/a.ts", "src/[!ab].ts", False),
+        ("src/a.test.mts", "**/*.{test,spec}.?(c|m)[jt]s?(x)", True),
+        ("src/a.test.tsx", "**/*.{test,spec}.?(c|m)[jt]s?(x)", True),
+        ("src/a.test.cjs", "**/*.{test,spec}.?(c|m)[jt]s?(x)", True),
+        ("src/a.test.mjsx", "**/*.{test,spec}.?(c|m)[jt]s?(x)", True),
+        ("src/a.test.json", "**/*.{test,spec}.?(c|m)[jt]s?(x)", False),
+    ],
+)
+def test_the_glob_reads_extended_groups_and_classes_as_vitest_does(lane, path, pattern, expected) -> None:
+    assert lane.specs.glob_matches(path, [pattern]) is expected
+
+
+@pytest.mark.parametrize(
+    "pattern", ["src/!(a).spec.ts", "src/**/*.spec.@(ts|!(tsx))", "src/@(a|b.spec.ts", "src/[z-a].ts"]
+)
+def test_a_glob_operator_the_matcher_cannot_read_is_refused_loudly(lane, tmp_path, pattern) -> None:
+    config = tmp_path / "vitest.config.ts"
+    config.write_text(f"export default {{ test: {{ include: ['{pattern}'] }} }}\n", encoding="utf-8")
+    with pytest.raises(lane.specs.UnreadableConfig):
+        lane.specs.package_rules(config)
+    with pytest.raises(lane.specs.UnreadableConfig):
+        lane.specs.glob_matches("src/a.spec.ts", [pattern])
+
+
+def test_the_vitest_defaults_are_the_two_the_locked_versions_ship(lane) -> None:
+    assert lane.specs.DEFAULT_EXCLUDE == ("**/node_modules/**", "**/.git/**")
+    assert lane.specs.DEFAULT_INCLUDE == ("**/*.{test,spec}.?(c|m)[jt]s?(x)",)
+
+
+def test_a_spec_under_a_directory_the_old_defaults_excluded_is_collected_when_only_the_defaults_are_spread(
+    lane, tmp_path
+) -> None:
+    config = tmp_path / "vitest.config.ts"
+    config.write_text(
+        "export default { test: { include: ['src/**/*.spec.ts'], exclude: [...configDefaults.exclude] } }\n",
+        encoding="utf-8",
+    )
+    rules = lane.specs.package_rules(config)
+    for relative in ("src/cypress/new.spec.ts", "src/dist/new.spec.ts", "src/.idea/new.spec.ts"):
+        assert lane.specs.collected(rules, relative), relative
+    assert not lane.specs.collected(rules, "src/node_modules/x/new.spec.ts")
+    assert not lane.specs.collected(rules, "src/.git/new.spec.ts")
+
+
+@pytest.mark.parametrize("name", ["vitest.config.mts", "vitest.config.cts"])
+def test_comments_are_stripped_from_every_config_suffix_vitest_looks_for(lane, tmp_path, name) -> None:
+    config = tmp_path / name
+    config.write_text(
+        "export default { test: {\n"
+        "  // include: ['dead/**/*.spec.ts'],\n"
+        "  /* include: ['also-dead/**/*.spec.ts'], */\n"
+        "  include: ['live/**/*.spec.ts'],\n"
+        "} }\n",
+        encoding="utf-8",
+    )
+    assert lane.specs.package_rules(config)[0] == ["live/**/*.spec.ts"]
+
+
 def test_braces_expand_in_groups_and_nested(lane) -> None:
     assert lane.specs.expand_braces("a.{b,c}.d") == ["a.b.d", "a.c.d"]
     assert lane.specs.expand_braces("x{a,{b,c}}") == ["xa", "xb", "xc"]
@@ -288,7 +361,7 @@ def test_the_frontend_config_excludes_what_the_suite_excludes(lane) -> None:
 
 
 def test_every_tracked_spec_looking_file_in_a_frontend_package_is_collected_or_excluded(lane) -> None:
-    """The census behind the red-on-unrun rule: touching any tracked spec-looking file must not fail the lane falsely."""
+    """The census behind the red-on-unrun rule: touching a tracked spec-looking file must not fail the lane falsely."""
     seen = 0
     neither: list[str] = []
     for package in _PACKAGES:
@@ -418,6 +491,21 @@ def test_vitest_runs_once_in_run_mode_on_exactly_the_selection_array(jobs) -> No
     assert "packages.txt" in run and 'mapfile -t FILES < "$SPECS_DIR/' in run
 
 
+@pytest.mark.parametrize(
+    "script,expected",
+    [
+        ('npx --no-install vitest run "${FILES[@]}"\n', [[_FILES_ARG]]),
+        ('npx --no-install vitest run "${FILES[@]}" --coverage\n', [[_FILES_ARG, "--coverage"]]),
+        ("npx --no-install vitest run\n", [[]]),
+        ("echo nothing runs here\n", []),
+        ('# npx --no-install vitest run "${FILES[@]}"\n', []),
+        ('echo ok # vitest run "${FILES[@]}"\n', []),
+    ],
+)
+def test_the_vitest_detector_accepts_the_selection_array_and_rejects_the_rest(script, expected) -> None:
+    assert _vitest_arguments(script) == expected
+
+
 def test_every_package_runs_and_one_failure_fails_the_job(jobs) -> None:
     run = _step(jobs, "Run the changed specs")["run"]
     lines = [line.strip() for line in run.splitlines() if line.strip()]
@@ -470,7 +558,9 @@ def test_changed_specs_turns_an_unreadable_config_into_an_error_and_a_non_zero_e
 
 def test_the_job_installs_with_npm_ci_where_a_lock_exists_and_npm_install_where_none_is_committed(jobs) -> None:
     run = _step(jobs, "Run the changed specs")["run"]
-    assert "if [ -f package-lock.json ]; then npm ci; else npm install; fi" in run
+    install = "if [ -f package-lock.json ]; then npm ci || exit 1; else npm install || exit 1; fi"
+    assert install in run, "inside the subshell that is the left side of `||` errexit is off: each install must exit"
+    assert run.index(install) < run.index("vitest run"), "the install comes before the run it prepares"
 
 
 def test_the_job_runs_no_pytest_pushes_nothing_and_inlines_no_expression(jobs) -> None:

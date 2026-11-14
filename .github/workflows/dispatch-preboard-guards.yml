@@ -419,7 +419,7 @@ jobs:
             echo "::group::$pkg: ${#FILES[@]} spec file(s)"
             (
               cd "$pkg" || exit 1
-              if [ -f package-lock.json ]; then npm ci; else npm install; fi
+              if [ -f package-lock.json ]; then npm ci || exit 1; else npm install || exit 1; fi
               npx --no-install vitest run "${FILES[@]}"
             ) < /dev/null || { echo "::error::the changed specs of $pkg failed"; rc=1; }
             echo "::endgroup::"

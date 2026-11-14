@@ -225,3 +225,50 @@ def test_an_apostrophe_in_a_line_comment_does_not_open_a_string_that_hides_later
     assert "'src/**/*.spec.ts'" in text, f"the glob was eaten: {text!r}"
     assert "const after = 1" in text and "real" not in text, text
     assert "worker" not in text and "don't" not in text
+
+
+def test_a_double_slash_inside_a_regex_class_is_not_a_line_comment() -> None:
+    """The regression against the previous scanner: the real block opener after the regex must still be found."""
+    source = "const re = /[//]/; /*\nbanned_token\n*/\nconst z = 1\n"
+    text = code_text(source, name="x.ts")
+    assert "banned_token" not in text, "the regex's `//` hid the block comment that follows it"
+    assert "/[//]/" in text and "const z = 1" in text, "the regex itself must be kept verbatim"
+
+
+def test_a_double_slash_after_a_division_is_still_a_line_comment() -> None:
+    text = code_text("const q = a / b // banned_token\nconst z = 1\n", name="x.ts", strip_trailing=True)
+    assert "banned_token" not in text and "const q = a / b" in text and "const z = 1" in text
+
+
+def test_a_block_comment_between_two_divisions_is_still_stripped() -> None:
+    text = code_text("x = 4 / 2 /* banned_token */ / 1\n", name="x.ts")
+    assert "banned_token" not in text and "x = 4 / 2" in text and "/ 1" in text
+
+
+def test_a_quote_inside_a_regex_does_not_open_a_string() -> None:
+    source = "const q = /'/; /* banned_token */\nconst s = 'x'\n"
+    text = code_text(source, name="x.ts")
+    assert "banned_token" not in text, "the regex's quote opened a string that hid the block comment"
+    assert "/'/" in text and "const s = 'x'" in text
+
+
+def test_a_regex_after_a_keyword_or_at_a_line_start_is_read_as_a_regex() -> None:
+    assert "banned_token" not in code_text("function f() { return /[//]/ } /* banned_token */\n", name="x.ts")
+    assert "banned_token" not in code_text("/[//]/.test(a) /* banned_token */\n", name="x.ts")
+
+
+def test_a_slash_with_no_closing_slash_on_its_line_is_a_plain_character() -> None:
+    text = code_text("const a = /unterminated\nconst b = 2 /* banned_token */\n", name="x.ts")
+    assert "banned_token" not in text and "const b = 2" in text
+
+
+def test_a_url_in_a_string_is_untouched_by_line_comment_handling() -> None:
+    text = code_text("const u = 'http://x/y' /* banned_token */ // tail\nconst v = 1\n", name="x.ts")
+    assert "http://x/y" in text and "banned_token" not in text and "const v = 1" in text
+
+
+@pytest.mark.parametrize("name", ["x.mts", "x.cts"])
+def test_module_typescript_suffixes_get_slash_and_block_comment_handling(name) -> None:
+    source = "// banned_one\n/* banned_two */\nconst live = 1\n"
+    text = code_text(source, name=name)
+    assert "banned" not in text and "const live = 1" in text
