@@ -44,6 +44,7 @@ behaviour matches what the seven call sites already relied on.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple, Sequence
 
@@ -144,6 +145,8 @@ class _BlockScan:
         self.line_comments = line_comments
         self.out: list[str] = []
         self.recent = ""  # the last few emitted characters, runs of blanks collapsed to one
+        self.size = 0  # characters emitted so far
+        self.cuts: list[int] = []  # output offsets where a `//` comment starts: the one source for "where it begins"
         self.quote: str | None = None
         self.in_block = False
         self.i = 0
@@ -160,6 +163,7 @@ class _BlockScan:
 
     def _emit(self, piece: str) -> None:
         self.out.append(piece)
+        self.size += len(piece)
         if piece.strip(" \t"):
             self.recent = (self.recent + piece)[-16:]
         elif not self.recent.endswith(" "):
@@ -196,6 +200,7 @@ class _BlockScan:
             self.i += 2
             return
         elif self.line_comments and self.text.startswith("//", self.i):
+            self.cuts.append(self.size)
             self._keep_to(self._line_end())
             return
         elif self.line_comments and char == "/" and self._regex_allowed() and self._regex_end():
@@ -260,6 +265,27 @@ def strip_block_comments(text: str, *, line_comments: bool = False) -> str:
     return _BlockScan(text, line_comments).run()
 
 
+def _scan_block_syntax(text: str, suffix: str) -> tuple[str, list[int] | None]:
+    """*text* with block comments blanked, and the offsets where `//` comments start; `None` for other syntaxes."""
+    if suffix not in _BLOCK_COMMENTS:
+        return text, None
+    scan = _BlockScan(text, True)
+    return scan.run(), scan.cuts
+
+
+def _cut_comment(raw: str, start: int, cuts: list[int]) -> str:
+    """*raw* (the line that begins at output offset *start*) up to the `//` comment the scanner found in it.
+
+    The scanner has already walked strings, templates, regex literals and block comments, so its offsets are the
+    only answer to "where does a trailing comment begin" on this path; a quote-only re-scan of the line would
+    disagree on a `//` inside a regex class.
+    """
+    index = bisect_left(cuts, start)
+    if index < len(cuts) and cuts[index] < start + len(raw):
+        return raw[: cuts[index] - start]
+    return raw
+
+
 def code_lines(
     source: str | Path,
     *,
@@ -286,15 +312,20 @@ def code_lines(
     markers = markers_for(name) if name is not None else _DEFAULT_MARKERS
     suffix = Path(name).suffix if name is not None else ""
     escapes = suffix in _BACKSLASH_ESCAPES
-    if suffix in _BLOCK_COMMENTS:
-        text = strip_block_comments(text, line_comments=True)
+    text, cuts = _scan_block_syntax(text, suffix)
 
     kept: list[CodeLine] = []
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        stripped = raw.lstrip()
-        if any(stripped.startswith(marker) for marker in markers):
+    offset = 0
+    for lineno, (raw, whole) in enumerate(zip(text.splitlines(), text.splitlines(True)), 1):
+        start, offset = offset, offset + len(whole)
+        if any(raw.lstrip().startswith(marker) for marker in markers):
             continue
-        kept.append(CodeLine(lineno, strip_trailing_comment(raw, markers, escapes=escapes) if strip_trailing else raw))
+        if strip_trailing:
+            if cuts is None:
+                raw = strip_trailing_comment(raw, markers, escapes=escapes)
+            else:
+                raw = _cut_comment(raw, start, cuts)
+        kept.append(CodeLine(lineno, raw))
 
     if join_continuations:
         kept = _join_continuations(kept)

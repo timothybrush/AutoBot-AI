@@ -313,3 +313,40 @@ def test_a_regex_literal_stays_a_regex_and_the_comment_after_it_is_stripped(sour
 def test_a_vue_line_with_a_closing_tag_a_html_comment_and_a_line_comment_is_read_as_code() -> None:
     text = code_text('<a href="/x/y">t</a> <!-- n --> // banned_token\n', name="x.vue", strip_trailing=True)
     assert 'href="/x/y">t</a>' in text and "banned_token" not in text and "<!-- n -->" in text
+
+
+#: Lines where the scanner and the older quote-only trailing strip must cut at the same place.
+_AGREED = [
+    ("const a = 1 // c", "const a = 1 "),
+    ("const u = 'http://x/y' // c", "const u = 'http://x/y' "),
+    ('const s = "a // b" // c', 'const s = "a // b" '),
+    ("no comment here", "no comment here"),
+]
+
+#: Lines the quote-only strip cannot read (a regex class, an escaped slash, a template, a division).
+_SCANNER_ONLY = [
+    ("const re = /[//]/; // c", "const re = /[//]/; "),
+    ("x = /a\\/\\/b/; // c", "x = /a\\/\\/b/; "),
+    ("const t = `x // y` // c", "const t = `x // y` "),
+    ("const n = i++ / 2; // c", "const n = i++ / 2; "),
+    ("x! / 2; // c", "x! / 2; "),
+    ("<b>x</b> // c", "<b>x</b> "),
+]
+
+
+@pytest.mark.parametrize("line,expected", _AGREED)
+def test_the_trailing_cut_is_the_scanners_and_matches_the_quote_only_strip_where_that_can_read_the_line(
+    line, expected
+) -> None:
+    assert code_text(line + "\n", name="x.ts", strip_trailing=True) == expected
+    assert strip_trailing_comment(line, ("//",)) == expected, "the two stages disagree on a line both can read"
+
+
+@pytest.mark.parametrize("line,expected", _SCANNER_ONLY)
+def test_the_trailing_cut_follows_the_scanner_on_lines_the_quote_only_strip_cannot_read(line, expected) -> None:
+    assert code_text(line + "\n", name="x.ts", strip_trailing=True) == expected
+
+
+def test_a_line_that_is_only_a_comment_is_dropped_and_numbering_survives_the_scanner_cut() -> None:
+    lines = code_lines("// whole\nconst a = 1 // t\n/* b */ const b = /[//]/ // t\n", name="x.ts", strip_trailing=True)
+    assert [(line.lineno, line.text.strip()) for line in lines] == [(2, "const a = 1"), (3, "const b = /[//]/")]
