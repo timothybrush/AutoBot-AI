@@ -36,6 +36,24 @@ from repo_tests._ratchet_base import BaseUnavailable, base_table, raised_entries
 _ISSUE = "https://github.com/mrveiss/AutoBot-AI/issues/21543"
 _USE_TOKEN = f" Use text-autobot-text-on-primary for a label on bg-autobot-primary. See {_ISSUE}."
 
+
+_TABLE = "WHITE_ON_PRIMARY_CLASS_LABELS"
+
+
+def _base_class_table() -> dict[str, int]:
+    """The table at the base; ``{}`` when the base has no such table yet. An unreadable base still raises."""
+    try:
+        return base_table(repo_root(), ("repo_tests/_hardcoded_colour_baseline.py",), _TABLE)
+    except BaseUnavailable as err:
+        if f"no literal {_TABLE}" not in str(err):
+            raise
+        return {}
+
+
+def _rose_against_base(now: dict[str, int], base: dict[str, int]) -> dict[str, tuple[int | None, int]]:
+    return raised_entries(now, base)
+
+
 _FIRES = {
     "same-line": '<button class="px-4 bg-autobot-primary text-white rounded">x</button>',
     "label-first": '<button class="text-white bg-autobot-primary">x</button>',
@@ -117,16 +135,16 @@ class TestTheRealTree:
         ), "no user-frontend file was read; the scan is blind to it."
 
     def test_no_entry_rose_against_the_base(self) -> None:
-        try:
-            base = base_table(
-                repo_root(), ("repo_tests/_hardcoded_colour_baseline.py",), "WHITE_ON_PRIMARY_CLASS_LABELS"
-            )
-        except BaseUnavailable as err:
-            if "no literal WHITE_ON_PRIMARY_CLASS_LABELS" not in str(err):
-                raise
-            pytest.skip("the table is introduced by #21543, so the base has none; this arms once it lands")
-        rose = raised_entries(WHITE_ON_PRIMARY_CLASS_LABELS, base)
-        assert not rose, f"class-form entries raised or added against the base (base, now): {rose}." + _USE_TOKEN
+        """No head entry exceeds its base count. A base without the table is an empty base, never a skip.
+
+        While this change is not yet on the base, the base table is ``{}``, so every head entry would be a
+        rise and the head table must itself be empty. A base commit that cannot be resolved still raises.
+        """
+        assert _rose_against_base(WHITE_ON_PRIMARY_CLASS_LABELS, _base_class_table()) == {}, _USE_TOKEN
+
+    def test_a_head_entry_over_an_empty_base_is_a_rise(self) -> None:
+        assert _rose_against_base({"a.vue": 1}, {}) == {"a.vue": (None, 1)}
+        assert _rose_against_base({}, {}) == {}
 
     def test_every_pinned_count_matches_the_tree(self) -> None:
         measured = _scan_white_class_on_primary(repo_root())
